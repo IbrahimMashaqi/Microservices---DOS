@@ -1,0 +1,64 @@
+# Bazar.com — Docker Compose orchestration
+# Spins up three isolated containers on a shared bridge network:
+#   catalog  (port 5001) — book catalog & stock management
+#   order    (port 5002) — purchase processing
+#   frontend (port 5000) — client-facing API gateway
+
+services:
+
+  catalog:
+    build:
+      context: ./catalog
+    container_name: bazar_catalog
+    ports:
+      - "5001:5001"
+    volumes:
+      # Persist the SQLite database file across container restarts
+      - catalog_data:/app
+    networks:
+      - bazar_net
+    restart: unless-stopped
+
+  order:
+    build:
+      context: ./order
+    container_name: bazar_order
+    ports:
+      - "5002:5002"
+    environment:
+      # Tell the order server where to reach the catalog server
+      - CATALOG_URL=http://catalog:5001
+    volumes:
+      # Persist the order log SQLite database
+      - order_data:/app
+    depends_on:
+      - catalog
+    networks:
+      - bazar_net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: bazar_frontend
+    ports:
+      - "5000:5000"
+    environment:
+      - CATALOG_URL=http://catalog:5001
+      - ORDER_URL=http://order:5002
+    depends_on:
+      - catalog
+      - order
+    networks:
+      - bazar_net
+    restart: unless-stopped
+
+# Named volumes for SQLite persistence
+volumes:
+  catalog_data:
+  order_data:
+
+# Isolated bridge network so containers resolve each other by service name
+networks:
+  bazar_net:
+    driver: bridge
