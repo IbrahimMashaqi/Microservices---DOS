@@ -1,41 +1,108 @@
-# Bazar.com — Docker Compose orchestration
-# Spins up three isolated containers on a shared bridge network:
-#   catalog  (port 5001) — book catalog & stock management
-#   order    (port 5002) — purchase processing
-#   frontend (port 5000) — client-facing API gateway
+# Services:
+#   catalog1  (port 5001) — catalog replica 1
+#   catalog2  (port 5011) — catalog replica 2
+#   order1    (port 5002) — order replica 1
+#   order2    (port 5012) — order replica 2
+#   frontend  (port 5000) — stateless API gateway with LRU cache + round-robin LB
 
 services:
-
-  catalog:
+  catalog1:
     build:
       context: ./catalog
-    container_name: bazar_catalog
+    container_name: bazar_catalog1
     ports:
       - "5001:5001"
+    environment:
+      - PEER_URL=http://catalog2:5001
+      - FRONTEND_URL=http://frontend:5000
+      - DB_PATH=/data/catalog.db
     volumes:
-      # Persist the SQLite database file across container restarts
-      - catalog_data:/app
+      - catalog1_data:/data
     networks:
       - bazar_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/search/ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
-  order:
+  catalog2:
+    build:
+      context: ./catalog
+    container_name: bazar_catalog2
+    ports:
+      - "5011:5001"
+    environment:
+      - PEER_URL=http://catalog1:5001
+      - FRONTEND_URL=http://frontend:5000
+      - DB_PATH=/data/catalog.db
+    volumes:
+      - catalog2_data:/data
+    networks:
+      - bazar_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/search/ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  order1:
     build:
       context: ./order
-    container_name: bazar_order
+    container_name: bazar_order1
     ports:
       - "5002:5002"
     environment:
-      # Tell the order server where to reach the catalog server
-      - CATALOG_URL=http://catalog:5001
+      - CATALOG_REPLICAS=http://catalog1:5001,http://catalog2:5001
+      - PEER_URL=http://order2:5002
+      - DB_PATH=/data/orders.db
     volumes:
-      # Persist the order log SQLite database
-      - order_data:/app
+      - order1_data:/data
     depends_on:
-      - catalog
+      catalog1:
+        condition: service_healthy
+      catalog2:
+        condition: service_healthy
     networks:
       - bazar_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  order2:
+    build:
+      context: ./order
+    container_name: bazar_order2
+    ports:
+      - "5012:5002"
+    environment:
+      - CATALOG_REPLICAS=http://catalog1:5001,http://catalog2:5001
+      - PEER_URL=http://order1:5002
+      - DB_PATH=/data/orders.db
+    volumes:
+      - order2_data:/data
+    depends_on:
+      catalog1:
+        condition: service_healthy
+      catalog2:
+        condition: service_healthy
+    networks:
+      - bazar_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   frontend:
     build:
@@ -44,21 +111,29 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - CATALOG_URL=http://catalog:5001
-      - ORDER_URL=http://order:5002
+      - CATALOG_REPLICAS=http://catalog1:5001,http://catalog2:5001
+      - ORDER_REPLICAS=http://order1:5002,http://order2:5002
     depends_on:
-      - catalog
-      - order
+      catalog1:
+        condition: service_healthy
+      catalog2:
+        condition: service_healthy
+      order1:
+        condition: service_healthy
+      order2:
+        condition: service_healthy
     networks:
       - bazar_net
     restart: unless-stopped
 
-# Named volumes for SQLite persistence
+# Named volumes — each replica keeps its own persistent SQLite file under /data
 volumes:
-  catalog_data:
-  order_data:
+  catalog1_data:
+  catalog2_data:
+  order1_data:
+  order2_data:
 
-# Isolated bridge network so containers resolve each other by service name
+# Isolated bridge network; containers resolve each other by service name
 networks:
   bazar_net:
     driver: bridge
